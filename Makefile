@@ -4,6 +4,7 @@ SHELL := /bin/bash -o pipefail
 .DEFAULT_GOAL := help
 
 # Default variables
+MNT_TYPE   ?= image # This can be 'image' to mount the image directly or 'device' to mount the SD card device
 MNT_DEVICE ?= /dev/mmcblk0
 MNT_ROOT    = /mnt/raspbernetes/root
 MNT_BOOT    = /mnt/raspbernetes/boot
@@ -11,7 +12,8 @@ RPI_HOME    = $(MNT_ROOT)/home/pi
 OUTPUT_PATH = output
 
 # Raspberry PI host and IP configuration
-RPI_NETWORK_TYPE ?= wlan0
+#RPI_NETWORK_TYPE ?= wlan0
+RPI_NETWORK_TYPE ?= eth0
 RPI_HOSTNAME     ?= rpi-kube-master-01
 RPI_IP           ?= 192.168.1.101
 RPI_GATEWAY      ?= 192.168.1.1
@@ -50,6 +52,15 @@ build: prepare format install-conf create-conf clean ## Build SD card with Kuber
 	echo "- Master IP 01: $(KUBE_MASTER_IP_01)"
 	echo "- Master IP 02: $(KUBE_MASTER_IP_02)"
 	echo "- Master IP 03: $(KUBE_MASTER_IP_03)"
+
+.PHONY: build-image
+build-image: prepare mount install-conf create-conf clean
+	mv $(OUTPUT_PATH)/$(RASPBIAN_IMAGE_VERSION).img $(OUTPUT_PATH)/$(RASPBIAN_IMAGE_VERSION).raspbernetes.img
+
+.PHONY: build-image-docker
+build-image-docker: prepare
+	docker build --tag raspbernetes-build .
+	docker run --privileged --rm --mount type=bind,source=$$(pwd)/$(OUTPUT_PATH),destination=/raspbernetes/$(OUTPUT_PATH) raspbernetes-build make build-image
 
 ##@ Configuration Generation
 .PHONY: install-conf
@@ -97,13 +108,35 @@ format: $(OUTPUT_PATH)/$(RASPBIAN_IMAGE_VERSION).img unmount ## Format the SD ca
 	echo "Formatting SD card with $(RASPBIAN_IMAGE_VERSION).img"
 	sudo dd bs=4M if=./$(OUTPUT_PATH)/$(RASPBIAN_IMAGE_VERSION).img of=$(MNT_DEVICE) status=progress conv=fsync
 
+.PHONY: prepare-mount
+prepare-mount:
+	sudo mkdir -p $(MNT_BOOT)
+	sudo mkdir -p $(MNT_ROOT)
+
 .PHONY: mount
-mount: ## Mount the current SD device
+mount: prepare prepare-mount mount-$(MNT_TYPE) ## Mount the SD device or image
+	mountpoint $(MNT_BOOT)
+	mountpoint $(MNT_ROOT)
+
+.PHONY: mount-image
+mount-image: prepare $(OUTPUT_PATH)/$(RASPBIAN_IMAGE_VERSION).img
+	./mount.sh $(OUTPUT_PATH)/$(RASPBIAN_IMAGE_VERSION).img $(MNT_ROOT) $(MNT_BOOT)
+
+.PHONY: mount-device
+mount-device: prepare
 	sudo mount $(MNT_DEVICE)p1 $(MNT_BOOT)
 	sudo mount $(MNT_DEVICE)p2 $(MNT_ROOT)
 
 .PHONY: unmount
-unmount: ## Unmount the current SD device
+unmount:
+	sudo umount $(MNT_BOOT) || true
+	sudo umount $(MNT_ROOT) || true
+
+.PHONY: unmount-image
+unmount-image: ## Nothing to do for unmount-image
+
+.PHONY: unmount-device
+unmount-device: ## Unmount the current SD device
 	sudo umount $(MNT_DEVICE)p1 || true
 	sudo umount $(MNT_DEVICE)p2 || true
 
@@ -118,11 +151,12 @@ wlan0: ## Install wpa_supplicant for auto network join
 .PHONY: eth0
 eth0: ## Nothing to do for eth0
 
-$(OUTPUT_PATH)/$(RASPBIAN_IMAGE_VERSION).img: ## Download Raspbian image and extract to current directory
-	echo "Downloading $(RASPBIAN_IMAGE_VERSION).img..."
-	wget $(RASPBIAN_URL) -P ./$(OUTPUT_PATH)/
-	unzip ./$(OUTPUT_PATH)/$(RASPBIAN_IMAGE_VERSION).zip -d ./$(OUTPUT_PATH)/
-	rm -f ./$(OUTPUT_PATH)/$(RASPBIAN_IMAGE_VERSION).zip
+$(OUTPUT_PATH)/$(RASPBIAN_IMAGE_VERSION).zip: ## Download Raspbian image zip
+	echo "Downloading $(RASPBIAN_IMAGE_VERSION).zip..."
+	wget --quiet $(RASPBIAN_URL) -P ./$(OUTPUT_PATH)/
+
+$(OUTPUT_PATH)/$(RASPBIAN_IMAGE_VERSION).img: $(OUTPUT_PATH)/$(RASPBIAN_IMAGE_VERSION).zip ## Extract Raspbian image zip
+	unzip -o ./$(OUTPUT_PATH)/$(RASPBIAN_IMAGE_VERSION).zip -d ./$(OUTPUT_PATH)/
 
 ##@ Misc
 .PHONY: help
@@ -139,13 +173,9 @@ help: ## Display this help
 ##@ Helpers
 .PHONY: prepare
 prepare: ## Create all necessary directories to be used in build
-	sudo mkdir -p $(MNT_BOOT)
-	sudo mkdir -p $(MNT_ROOT)
 	mkdir -p ./$(OUTPUT_PATH)/ssh/
 
 .PHONY: clean
-clean: ## Unmount and delete all temporary mount directories
-	sudo umount $(MNT_DEVICE)p1 || true
-	sudo umount $(MNT_DEVICE)p2 || true
+clean: unmount unmount-$(MNT_TYPE) ## Unmount and delete all temporary mount directories
 	sudo rm -rf $(MNT_BOOT)
 	sudo rm -rf $(MNT_ROOT)
